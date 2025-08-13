@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=Krita/PythonPlugin
+X-KDE-Library=kra_palette
+X-Python-2-Compatible=false
+Name=KRA Palette
+Comment=Per-document palette docker stored inside .kra
