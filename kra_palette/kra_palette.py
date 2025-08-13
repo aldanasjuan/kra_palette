@@ -37,13 +37,16 @@ class KRA_Palette_Docker(DockWidget):
 		self.btn_fg = QPushButton("Add FG")
 		self.btn_bg = QPushButton("Add BG")
 		self.btn_rm = QPushButton("Remove")
+		self.btn_sort = QPushButton("Sort")
 		self.btn_rm.setEnabled(False)
 		row.addWidget(self.btn_fg)
 		row.addWidget(self.btn_bg)
 		row.addStretch(1)
 		row2.addWidget(self.btn_rm)
+		row2.addWidget(self.btn_sort)
 		vbox.addLayout(row)
 		vbox.addLayout(row2)
+
 		self.area = _SwatchArea()
 		self.grid = FlowLayout(self.area, 0, 4, 4)
 		self.grid.setSizeConstraint(QLayout.SetMinimumSize)
@@ -52,6 +55,7 @@ class KRA_Palette_Docker(DockWidget):
 		self.btn_fg.clicked.connect(self._add_fg)
 		self.btn_bg.clicked.connect(self._add_bg)
 		self.btn_rm.clicked.connect(self._remove_selected)
+		self.btn_sort.clicked.connect(self._sort_and_save)
 		self.area.resized.connect(self._rebuild_grid)
 
 	def canvasChanged(self, canvas):
@@ -113,6 +117,15 @@ class KRA_Palette_Docker(DockWidget):
 		self._save_to_doc()
 		self._rebuild_grid()
 
+	def _sort_and_save(self):
+		if not self._colors:
+			return
+		self._colors = self._sort_colors_smart(self._colors)
+		self._sel_idx = None
+		self.btn_rm.setEnabled(False)
+		self._save_to_doc()
+		self._rebuild_grid()
+
 	# ----- UI helpers -----
 	def _rebuild_grid(self):
 		# rebuild swatch widgets and lay them out based on current width
@@ -127,7 +140,6 @@ class KRA_Palette_Docker(DockWidget):
 			self.grid.addWidget(sw)
 
 		self._update_selection_styles()
-
 
 	def _clear_grid(self):
 		while self.grid.count():
@@ -185,113 +197,136 @@ class KRA_Palette_Docker(DockWidget):
 		win = app.activeWindow()
 		return win.activeView() if win else None
 
+	# ----- color sorting -----
+	def _sort_colors_smart(self, hex_list):
+		"""
+		Sort swatches in a color-sensible way:
+		1) Grays first (by value/brightness, dark -> light)
+		2) Colors by Hue (0..359), then Value desc (brighter first), then Saturation desc
+		"""
+		GRAY_SAT = 20  # 0..255 from Qt; <=20 ≈ grayscale
+
+		def key(hexcol):
+			qc = QColor(hexcol)
+			h = qc.hsvHue()           # 0..359 or -1 for achromatic
+			s = qc.hsvSaturation()    # 0..255
+			v = qc.value()            # 0..255
+
+			is_gray = (s <= GRAY_SAT) or (h < 0)
+			if is_gray:
+				# group 0 (grays): sort by value (dark->light)
+				return (0, v, 0, 0)
+			# group 1 (colors): sort by hue, then brighter first, then more saturated
+			return (1, h, -v, -s)
+
+		return sorted(hex_list, key=key)
+
 # register docker
 Krita.instance().addDockWidgetFactory(
 	DockWidgetFactory("kra_palette_docker", DockWidgetFactoryBase.DockRight, KRA_Palette_Docker)
 )
 
 
-
 class FlowLayout(QLayout):
-    def __init__(self, parent=None, margin=0, hspacing=-1, vspacing=-1):
-        super().__init__(parent)
-        self._items = []
-        self.setContentsMargins(margin, margin, margin, margin)
-        self._hspace = hspacing
-        self._vspace = vspacing
+	def __init__(self, parent=None, margin=0, hspacing=-1, vspacing=-1):
+		super().__init__(parent)
+		self._items = []
+		self.setContentsMargins(margin, margin, margin, margin)
+		self._hspace = hspacing
+		self._vspace = vspacing
 
-    # --- QLayout abstract methods ---
-    def addItem(self, item):
-        self._items.append(item)
+	# --- QLayout abstract methods ---
+	def addItem(self, item):
+		self._items.append(item)
 
-    def count(self):
-        return len(self._items)
+	def count(self):
+		return len(self._items)
 
-    def itemAt(self, index):
-        return self._items[index] if 0 <= index < len(self._items) else None
+	def itemAt(self, index):
+		return self._items[index] if 0 <= index < len(self._items) else None
 
-    def takeAt(self, index):
-        return self._items.pop(index) if 0 <= index < len(self._items) else None
+	def takeAt(self, index):
+		return self._items.pop(index) if 0 <= index < len(self._items) else None
 
-    def expandingDirections(self):
-        # No forced expansion; lets container size to contents
-        return Qt.Orientations(0)
+	def expandingDirections(self):
+		# No forced expansion; lets container size to contents
+		return Qt.Orientations(0)
 
-    def hasHeightForWidth(self):
-        return True
+	def hasHeightForWidth(self):
+		return True
 
-    def heightForWidth(self, width):
-        return self._doLayout(QRect(0, 0, width, 0), test_only=True)
+	def heightForWidth(self, width):
+		return self._doLayout(QRect(0, 0, width, 0), test_only=True)
 
-    def setGeometry(self, rect):
-        super().setGeometry(rect)
-        self._doLayout(rect, test_only=False)
+	def setGeometry(self, rect):
+		super().setGeometry(rect)
+		self._doLayout(rect, test_only=False)
 
-    def sizeHint(self):
-        return self.minimumSize()
+	def sizeHint(self):
+		return self.minimumSize()
 
-    def minimumSize(self):
-        # Base on laid-out geometry for the current set of items
-        mleft, mtop, mright, mbottom = self.getContentsMargins()
-        size = QSize(0, 0)
-        for item in self._items:
-            size = size.expandedTo(item.minimumSize())
-        size += QSize(mleft + mright, mtop + mbottom)
-        return size
+	def minimumSize(self):
+		# Base on laid-out geometry for the current set of items
+		mleft, mtop, mright, mbottom = self.getContentsMargins()
+		size = QSize(0, 0)
+		for item in self._items:
+			size = size.expandedTo(item.minimumSize())
+		size += QSize(mleft + mright, mtop + mbottom)
+		return size
 
-    # --- helpers ---
-    def horizontalSpacing(self):
-        if self._hspace >= 0:
-            return self._hspace
-        return self.smartSpacing(QStyle.PM_LayoutHorizontalSpacing)
+	# --- helpers ---
+	def horizontalSpacing(self):
+		if self._hspace >= 0:
+			return self._hspace
+		return self.smartSpacing(QStyle.PM_LayoutHorizontalSpacing)
 
-    def verticalSpacing(self):
-        if self._vspace >= 0:
-            return self._vspace
-        return self.smartSpacing(QStyle.PM_LayoutVerticalSpacing)
+	def verticalSpacing(self):
+		if self._vspace >= 0:
+			return self._vspace
+		return self.smartSpacing(QStyle.PM_LayoutVerticalSpacing)
 
-    def smartSpacing(self, pm):
-        parent = self.parent()
-        if parent is None:
-            return 6  # reasonable default
-        from PyQt5.QtWidgets import QWidget, QStyle
-        if isinstance(parent, QWidget):
-            return parent.style().pixelMetric(pm, None, parent)
-        return 6
+	def smartSpacing(self, pm):
+		parent = self.parent()
+		if parent is None:
+			return 6  # reasonable default
+		from PyQt5.QtWidgets import QWidget, QStyle
+		if isinstance(parent, QWidget):
+			return parent.style().pixelMetric(pm, None, parent)
+		return 6
 
-    def _doLayout(self, rect, test_only):
-        from PyQt5.QtWidgets import QStyle
-        mleft, mtop, mright, mbottom = self.getContentsMargins()
-        x = rect.x() + mleft
-        y = rect.y() + mtop
-        line_height = 0
+	def _doLayout(self, rect, test_only):
+		from PyQt5.QtWidgets import QStyle
+		mleft, mtop, mright, mbottom = self.getContentsMargins()
+		x = rect.x() + mleft
+		y = rect.y() + mtop
+		line_height = 0
 
-        hspace = self._hspace if self._hspace >= 0 else 6
-        vspace = self._vspace if self._vspace >= 0 else 6
+		hspace = self._hspace if self._hspace >= 0 else 6
+		vspace = self._vspace if self._vspace >= 0 else 6
 
-        effective_rect = QRect(rect.x() + mleft, rect.y() + mtop,
-                               rect.width() - (mleft + mright),
-                               rect.height() - (mtop + mbottom))
+		effective_rect = QRect(rect.x() + mleft, rect.y() + mtop,
+							   rect.width() - (mleft + mright),
+							   rect.height() - (mtop + mbottom))
 
-        for item in self._items:
-            wid = item.widget()
-            if wid and not wid.isVisible():
-                continue
-            spaceX = hspace
-            spaceY = vspace
-            next_x = x + item.sizeHint().width() + spaceX
-            if next_x - spaceX > effective_rect.right() + 1 and line_height > 0:
-                # wrap
-                x = effective_rect.x()
-                y = y + line_height + spaceY
-                next_x = x + item.sizeHint().width() + spaceX
-                line_height = 0
+		for item in self._items:
+			wid = item.widget()
+			if wid and not wid.isVisible():
+				continue
+			spaceX = hspace
+			spaceY = vspace
+			next_x = x + item.sizeHint().width() + spaceX
+			if next_x - spaceX > effective_rect.right() + 1 and line_height > 0:
+				# wrap
+				x = effective_rect.x()
+				y = y + line_height + spaceY
+				next_x = x + item.sizeHint().width() + spaceX
+				line_height = 0
 
-            if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
+			if not test_only:
+				item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
 
-            x = next_x
-            line_height = max(line_height, item.sizeHint().height())
+			x = next_x
+			line_height = max(line_height, item.sizeHint().height())
 
-        total_height = (y + line_height + mbottom) - rect.y()
-        return total_height
+		total_height = (y + line_height + mbottom) - rect.y()
+		return total_height
