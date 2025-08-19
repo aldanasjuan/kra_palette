@@ -1,12 +1,12 @@
 from krita import Krita, DockWidget, DockWidgetFactory, DockWidgetFactoryBase, ManagedColor
-from PyQt5.QtCore import QByteArray, Qt, pyqtSignal, QPoint, QRect, QSize
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QGridLayout, QFrame, QLayout, QStyle
-from PyQt5.QtGui import QColor
-import json
+from PyQt5.QtCore import *
+from PyQt5.QtWidgets import *
+from PyQt5.QtGui import *
+import json, re
 
 ANNOTATION_TYPE = "com.example.kra-palette"
 ANNOTATION_DESC = "Per-document palette (stored in .kra as annotation)"
-
+_PALETTE_BUFFER = []
 
 class _SwatchArea(QWidget):
 	resized = pyqtSignal()
@@ -22,10 +22,10 @@ class KRA_Palette_Docker(DockWidget):
 		self._colors = []          # list[str] like "#RRGGBB"
 		self._swatches = []        # list[QFrame]
 		self._sel_idx = None       # selected swatch index
-		self._swatch_px = 18
+		self._swatch_px = 20
 
 		# UI
-		root = QWidget(self)
+		root = ResizeAwareWidget(self)
 		root.setContentsMargins(8, 8, 8, 8)
 		self.setWidget(root)
 		vbox = QVBoxLayout(root)
@@ -34,35 +34,69 @@ class KRA_Palette_Docker(DockWidget):
 
 		row = QHBoxLayout()
 		row2 = QHBoxLayout()
+		row3 = QHBoxLayout()
+		row4 = QHBoxLayout()
+
 		self.btn_fg = QPushButton("Add FG")
 		self.btn_bg = QPushButton("Add BG")
 		self.btn_rm = QPushButton("Remove")
-		self.btn_sort = QPushButton("Sort")
+		# self.btn_sort = QPushButton("Sort")
+		self.btn_copy = QPushButton("Copy")
+		self.btn_paste = QPushButton("Paste")
 		self.btn_rm.setEnabled(False)
+
 		row.addWidget(self.btn_fg)
 		row.addWidget(self.btn_bg)
-		row.addStretch(1)
 		row2.addWidget(self.btn_rm)
-		row2.addWidget(self.btn_sort)
+		# row2.addWidget(self.btn_sort)
+		row3.addWidget(self.btn_copy)
+		row3.addWidget(self.btn_paste)
+		row4.addWidget(QLabel("Size"))
+
+		self.size_spin = QSpinBox()
+		self.size_spin.setRange(8, 64)
+		self.size_spin.setSingleStep(1)
+		self.size_spin.setValue(self._swatch_px)
+		row4.addWidget(self.size_spin)
+
 		vbox.addLayout(row)
+		vbox.addLayout(row3)
+		vbox.addLayout(row4)
 		vbox.addLayout(row2)
 
 		self.area = _SwatchArea()
-		self.grid = FlowLayout(self.area, 0, 4, 4)
-		self.grid.setSizeConstraint(QLayout.SetMinimumSize)
-		vbox.addWidget(self.area, 1)
+		self.grid = FlowLayout(self.area)
+		
+		# self.grid.setContentsMargins(0, 0, 0, 0)
+		# self.grid.setSpacing(1)
+		# self.grid.setSizeConstraint(QLayout.SetMinimumSize)
 
+		#scroll
+		self.scroll = QScrollArea()
+		self.scroll.setWidgetResizable(True)
+		self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # vertical only
+		self.scroll.setFrameShape(QFrame.NoFrame)
+		self.area.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
+		self.scroll.setWidget(self.area)
+		vbox.addWidget(self.scroll, 1)
+
+		root.resized.connect(self._sort_and_save)
 		self.btn_fg.clicked.connect(self._add_fg)
 		self.btn_bg.clicked.connect(self._add_bg)
 		self.btn_rm.clicked.connect(self._remove_selected)
-		self.btn_sort.clicked.connect(self._sort_and_save)
-		self.area.resized.connect(self._rebuild_grid)
+		# self.btn_sort.clicked.connect(self._sort_and_save)
+		self.size_spin.valueChanged.connect(self._on_size_changed)
+		self.btn_copy.clicked.connect(self._copy_palette)
+		self.btn_paste.clicked.connect(self._paste_palette)
 
 	def canvasChanged(self, canvas):
 		# Canvas has no .document(); grab active document when canvas exists
 		self._doc = Krita.instance().activeDocument() if canvas else None
 		self._load_from_doc()
 
+	def _on_size_changed(self, val: int):
+		self._swatch_px = int(val)
+		self._sort_and_save()
 	# ----- palette I/O (annotation in .kra) -----
 	def _load_from_doc(self):
 		self._colors = []
@@ -75,9 +109,10 @@ class KRA_Palette_Docker(DockWidget):
 			data = bytes(self._doc.annotation(ANNOTATION_TYPE))
 			if data:
 				self._colors = json.loads(data.decode("utf-8")) or []
+				self._sort_and_save()
 		except Exception:
 			self._colors = []
-		self._rebuild_grid()
+		
 
 	def _save_to_doc(self):
 		if not self._doc:
@@ -94,8 +129,7 @@ class KRA_Palette_Docker(DockWidget):
 		mc = view.foregroundColor()
 		qc = mc.colorForCanvas(view.canvas())
 		self._colors.append(qc.name())  # "#RRGGBB"
-		self._save_to_doc()
-		self._rebuild_grid()
+		self._sort_and_save()
 
 	def _add_bg(self):
 		view = self._active_view()
@@ -104,8 +138,7 @@ class KRA_Palette_Docker(DockWidget):
 		mc = view.backgroundColor()
 		qc = mc.colorForCanvas(view.canvas())
 		self._colors.append(qc.name())
-		self._save_to_doc()
-		self._rebuild_grid()
+		self._sort_and_save()
 
 	def _remove_selected(self):
 		if self._sel_idx is None:
@@ -114,12 +147,10 @@ class KRA_Palette_Docker(DockWidget):
 			self._colors.pop(self._sel_idx)
 		self._sel_idx = None
 		self.btn_rm.setEnabled(False)
-		self._save_to_doc()
-		self._rebuild_grid()
+		self._sort_and_save()
 
 	def _sort_and_save(self):
-		if not self._colors:
-			return
+
 		self._colors = self._sort_colors_smart(self._colors)
 		self._sel_idx = None
 		self.btn_rm.setEnabled(False)
@@ -133,7 +164,7 @@ class KRA_Palette_Docker(DockWidget):
 		self._swatches = []
 		if not self._colors:
 			return
-
+		# cols = self._cols_for_width()
 		for i, hexcol in enumerate(self._colors):
 			sw = self._make_swatch(hexcol, i)
 			self._swatches.append(sw)
@@ -141,6 +172,12 @@ class KRA_Palette_Docker(DockWidget):
 
 		self._update_selection_styles()
 
+	# def _cols_for_width(self) -> int:
+	# 	avail = max(1, self.area.width())
+	# 	cell = self._swatch_px + self.grid.spacing()
+	# 	cols = max(1, avail // cell)
+	# 	return cols
+	
 	def _clear_grid(self):
 		while self.grid.count():
 			item = self.grid.takeAt(0)
@@ -200,133 +237,190 @@ class KRA_Palette_Docker(DockWidget):
 	# ----- color sorting -----
 	def _sort_colors_smart(self, hex_list):
 		"""
-		Sort swatches in a color-sensible way:
-		1) Grays first (by value/brightness, dark -> light)
-		2) Colors by Hue (0..359), then Value desc (brighter first), then Saturation desc
+		Sort swatches as a rainbow using HSL:
+		- Colors: by Hue (0..359), then Lightness DESC (lighter first), then Saturation DESC
+		- Grays (very low saturation or no hue): placed after colors, Lightness ASC (light -> dark)
 		"""
-		GRAY_SAT = 20  # 0..255 from Qt; <=20 ≈ grayscale
+		GRAY_SAT = 20  # 0..255 (Qt). <=20 ≈ achromatic
 
-		def key(hexcol):
+		def key(hexcol: str):
 			qc = QColor(hexcol)
-			h = qc.hsvHue()           # 0..359 or -1 for achromatic
-			s = qc.hsvSaturation()    # 0..255
-			v = qc.value()            # 0..255
+			h = qc.hslHue()         # 0..359, or -1 if achromatic
+			s = qc.hslSaturation()  # 0..255
+			l = qc.lightness()      # 0..255
 
 			is_gray = (s <= GRAY_SAT) or (h < 0)
 			if is_gray:
-				# group 0 (grays): sort by value (dark->light)
-				return (0, v, 0, 0)
-			# group 1 (colors): sort by hue, then brighter first, then more saturated
-			return (1, h, -v, -s)
+				# group 1 (after colors): sort by lightness (light -> dark)
+				return (1, l)
+
+			# group 0 (colors): Hue rainbow, then lighter first, then more saturated
+			return (0, h, -l, -s)
 
 		return sorted(hex_list, key=key)
+	
+	def _copy_palette(self):
+		# Copy current hex list to both our buffer and the system clipboard as JSON
+		global _PALETTE_BUFFER
+		_PALETTE_BUFFER = list(self._colors)
+		payload = {"type": ANNOTATION_TYPE, "colors": self._colors}
+		try:
+			QApplication.clipboard().setText(json.dumps(payload))
+		except Exception:
+			pass  # clipboard might be unavailable; buffer still works
 
+	def _paste_palette(self):
+		# Append colors from clipboard (or our buffer) into this doc's palette
+		colors = []
+
+		# 1) try system clipboard
+		try:
+			txt = QApplication.clipboard().text()
+			if txt:
+				try:
+					obj = json.loads(txt)
+					if isinstance(obj, dict) and "colors" in obj:
+						colors = obj["colors"]
+					elif isinstance(obj, list):
+						colors = obj
+					else:
+						# maybe a plain string of hex codes
+						colors = [t for t in re.split(r"[,\s;]+", txt) if t]
+				except Exception:
+					colors = [t for t in re.split(r"[,\s;]+", txt) if t]
+		except Exception:
+			pass
+
+		# 2) fallback to our in-memory buffer
+		if not colors:
+			global _PALETTE_BUFFER
+			colors = list(_PALETTE_BUFFER)
+
+		if not colors:
+			return
+
+		# normalize & validate (#rrggbb, lower-case)
+		valid = []
+		for c in colors:
+			qc = QColor(str(c))
+			if qc.isValid():
+				valid.append(qc.name())  # Krita/Qt returns '#rrggbb'
+
+		if not valid:
+			return
+
+		# append deduped, preserving order
+		seen = set(self._colors)
+		appended = False
+		for hexcol in valid:
+			if hexcol not in seen:
+				self._colors.append(hexcol)
+				seen.add(hexcol)
+				appended = True
+
+		if not appended:
+			return
+
+		self._sort_and_save()
 # register docker
 Krita.instance().addDockWidgetFactory(
 	DockWidgetFactory("kra_palette_docker", DockWidgetFactoryBase.DockRight, KRA_Palette_Docker)
 )
 
+class ResizeAwareWidget(QWidget):
+	resized = pyqtSignal(object)  # emits QResizeEvent or size as you prefer
+	def resizeEvent(self, e):
+		self.resized.emit(e.size())   # or emit(e)
+		super().resizeEvent(e)
+
 
 class FlowLayout(QLayout):
-	def __init__(self, parent=None, margin=0, hspacing=-1, vspacing=-1):
-		super().__init__(parent)
-		self._items = []
-		self.setContentsMargins(margin, margin, margin, margin)
-		self._hspace = hspacing
-		self._vspace = vspacing
+    def __init__(self, parent=None):
+        super().__init__(parent)
 
-	# --- QLayout abstract methods ---
-	def addItem(self, item):
-		self._items.append(item)
+        if parent is not None:
+            self.setContentsMargins(QMargins(0, 0, 0, 0))
 
-	def count(self):
-		return len(self._items)
+        self._item_list = []
 
-	def itemAt(self, index):
-		return self._items[index] if 0 <= index < len(self._items) else None
+    def __del__(self):
+        item = self.takeAt(0)
+        while item:
+            item = self.takeAt(0)
 
-	def takeAt(self, index):
-		return self._items.pop(index) if 0 <= index < len(self._items) else None
+    def addItem(self, item):
+        self._item_list.append(item)
 
-	def expandingDirections(self):
-		# No forced expansion; lets container size to contents
-		return Qt.Orientations(0)
+    def count(self):
+        return len(self._item_list)
 
-	def hasHeightForWidth(self):
-		return True
+    def itemAt(self, index):
+        if 0 <= index < len(self._item_list):
+            return self._item_list[index]
 
-	def heightForWidth(self, width):
-		return self._doLayout(QRect(0, 0, width, 0), test_only=True)
+        return None
 
-	def setGeometry(self, rect):
-		super().setGeometry(rect)
-		self._doLayout(rect, test_only=False)
+    def takeAt(self, index):
+        if 0 <= index < len(self._item_list):
+            return self._item_list.pop(index)
 
-	def sizeHint(self):
-		return self.minimumSize()
+        return None
 
-	def minimumSize(self):
-		# Base on laid-out geometry for the current set of items
-		mleft, mtop, mright, mbottom = self.getContentsMargins()
-		size = QSize(0, 0)
-		for item in self._items:
-			size = size.expandedTo(item.minimumSize())
-		size += QSize(mleft + mright, mtop + mbottom)
-		return size
+    def expandingDirections(self):
+        return Qt.Orientation(0)
 
-	# --- helpers ---
-	def horizontalSpacing(self):
-		if self._hspace >= 0:
-			return self._hspace
-		return self.smartSpacing(QStyle.PM_LayoutHorizontalSpacing)
+    def hasHeightForWidth(self):
+        return True
 
-	def verticalSpacing(self):
-		if self._vspace >= 0:
-			return self._vspace
-		return self.smartSpacing(QStyle.PM_LayoutVerticalSpacing)
+    def heightForWidth(self, width):
+        height = self._do_layout(QRect(0, 0, width, 0), True)
+        return height
 
-	def smartSpacing(self, pm):
-		parent = self.parent()
-		if parent is None:
-			return 6  # reasonable default
-		from PyQt5.QtWidgets import QWidget, QStyle
-		if isinstance(parent, QWidget):
-			return parent.style().pixelMetric(pm, None, parent)
-		return 6
+    def setGeometry(self, rect):
+        super(FlowLayout, self).setGeometry(rect)
+        self._do_layout(rect, False)
 
-	def _doLayout(self, rect, test_only):
-		from PyQt5.QtWidgets import QStyle
-		mleft, mtop, mright, mbottom = self.getContentsMargins()
-		x = rect.x() + mleft
-		y = rect.y() + mtop
-		line_height = 0
+    def sizeHint(self):
+        return self.minimumSize()
 
-		hspace = self._hspace if self._hspace >= 0 else 6
-		vspace = self._vspace if self._vspace >= 0 else 6
+    def minimumSize(self):
+        size = QSize()
 
-		effective_rect = QRect(rect.x() + mleft, rect.y() + mtop,
-							   rect.width() - (mleft + mright),
-							   rect.height() - (mtop + mbottom))
+        for item in self._item_list:
+            size = size.expandedTo(item.minimumSize())
 
-		for item in self._items:
-			wid = item.widget()
-			if wid and not wid.isVisible():
-				continue
-			spaceX = hspace
-			spaceY = vspace
-			next_x = x + item.sizeHint().width() + spaceX
-			if next_x - spaceX > effective_rect.right() + 1 and line_height > 0:
-				# wrap
-				x = effective_rect.x()
-				y = y + line_height + spaceY
-				next_x = x + item.sizeHint().width() + spaceX
-				line_height = 0
+        size += QSize(2 * self.contentsMargins().top(), 2 * self.contentsMargins().top())
+        return size
 
-			if not test_only:
-				item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
+    def _do_layout(self, rect, test_only):
+        x = rect.x()
+        y = rect.y()
+        line_height = 0
+        spacing = self.spacing()
 
-			x = next_x
-			line_height = max(line_height, item.sizeHint().height())
+        for item in self._item_list:
+            style = item.widget().style()
+            layout_spacing_x = style.layoutSpacing(
+                QSizePolicy.ControlType.PushButton, QSizePolicy.ControlType.PushButton,
+                Qt.Orientation.Horizontal
+            )
+            layout_spacing_y = style.layoutSpacing(
+                QSizePolicy.ControlType.PushButton, QSizePolicy.ControlType.PushButton,
+                Qt.Orientation.Vertical
+            )
+            space_x = spacing + layout_spacing_x
+            space_y = spacing + layout_spacing_y
+            next_x = x + item.sizeHint().width() + space_x
+            if next_x - space_x > rect.right() and line_height > 0:
+                x = rect.x()
+                y = y + line_height + space_y
+                next_x = x + item.sizeHint().width() + space_x
+                line_height = 0
 
-		total_height = (y + line_height + mbottom) - rect.y()
-		return total_height
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
+
+            x = next_x
+            line_height = max(line_height, item.sizeHint().height())
+
+        return y + line_height - rect.y()
