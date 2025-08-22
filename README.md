@@ -7,6 +7,8 @@ This plugin adds a kra palette docker, which lets you save swatches directly in 
 
 Copy the kra_palette into the resources/pykrita folder. It should end up like resources/pykrita/kra_palette. 
 
+*Note: The resources folder is whatever folder your krita installation uses for resources. You can find it in Settings -> Manage Resources -> Open Resource Folder
+
 Copy the kra_palette.desktop file into resources/pykrita as well. The folder and the .desktop files should be next to each other. 
 
 ## Usage
